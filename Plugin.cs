@@ -8,6 +8,7 @@ using UnityEngine;
 using System.Collections.Generic;
 using UnityEngine.SceneManagement;
 using FMODSyntax;
+using System.Reflection;
 
 namespace CustomGarage
 {
@@ -15,6 +16,8 @@ namespace CustomGarage
     {
         public Vector3 position;
         public Quaternion rotation;
+        public float FOV;
+        public bool IsOrthographic;
     }
 
     [BepInPlugin(pluginGUID, pluginName, pluginVersion)]
@@ -35,6 +38,7 @@ namespace CustomGarage
         public ConfigEntry<bool> keepOriginalScenery;
         public ConfigEntry<bool> blueprintGarageVisible;
         public ConfigEntry<bool> useCustomCameras;
+        public ConfigEntry<bool> keepCat;
 
         //Camera paints: reel/outer ring, camera body, inner reel/inner ring
         public bool usingCustomCameras = false;
@@ -56,6 +60,7 @@ namespace CustomGarage
             keepOriginalScenery = Config.Bind("Settings", "Keep Original Scenery", false, "Should the original scenery be visible?");
             blueprintGarageVisible = Config.Bind("Settings", "Blueprint Garage Visible", true, "Should the blueprint garage be visible (for open world menu)");
             useCustomCameras = Config.Bind("Settings", "Use Custom Camera Positions", false, "Do we use the regular camera's, or the in the blueprint defined camera positions?");
+            keepCat = Config.Bind("Settings", "Keep Cat Active", true, "When Keep Original Scenery is off, prevent the cat from being hidden as well.");
 
             // Plugin startup logic
             Logger.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
@@ -64,8 +69,9 @@ namespace CustomGarage
         public void OnMainMenu()
         {
             //If the plugin is not enabled, stop executing.
-            if(!pluginEnabled.Value)
+            if (!pluginEnabled.Value)
             {
+                usingCustomCameras = false;
                 return;
             }
 
@@ -80,7 +86,7 @@ namespace CustomGarage
 
             //Read the blueprint file
             ZeeplevelFile zeepFile = new ZeeplevelFile(blueprintFilePath);
-            if(!zeepFile.Valid)
+            if (!zeepFile.Valid)
             {
                 Debug.LogError("Blueprint not valid");
                 return;
@@ -88,7 +94,7 @@ namespace CustomGarage
 
             //Find the garage block in the blueprint
             bool containsBlock = zeepFile.Blocks.Any(block => block.BlockID == 2290);
-            if(!containsBlock)
+            if (!containsBlock)
             {
                 Debug.LogError("Blueprint doesnt contain the garage block");
                 return;
@@ -99,23 +105,29 @@ namespace CustomGarage
 
             BlockProperties garageBlockProperties = null;
             List<BlockProperties> tempCamBps = new List<BlockProperties>();
+            BlockProperties catSpawner = null;
 
             foreach (Transform child in bpCopy.transform)
             {
                 BlockProperties blockProperties = child.GetComponent<BlockProperties>();
+
                 if (blockProperties != null && blockProperties.blockID == 2290)
                 {
                     garageBlockProperties = blockProperties;
-                    break;
                 }
 
                 if (blockProperties != null && blockProperties.blockID == 2008)
                 {
-                    if(useCustomCameras.Value)
+                    if (useCustomCameras.Value)
                     {
                         tempCamBps.Add(blockProperties);
                     }
-                    break;
+                }
+
+                if (blockProperties != null && blockProperties.blockID == 42)
+                {
+                    catSpawner = blockProperties;
+                    catSpawner.gameObject.SetActive(false);
                 }
             }
 
@@ -146,8 +158,8 @@ namespace CustomGarage
             // Step 3: Adjust the parent position so the child ends up at the target position
             Vector3 garageShift = garageBlockProperties.gameObject.transform.position - bpCopy.transform.position;
             bpCopy.transform.position = targetPosition - garageShift;
-            
-            if(!blueprintGarageVisible.Value)
+
+            if (!blueprintGarageVisible.Value)
             {
                 garageBlockProperties.gameObject.SetActive(false);
             }
@@ -166,7 +178,7 @@ namespace CustomGarage
                         {
                             if (child.name == "TIME BASED COSMETICS")
                             {
-                                if(!allowSeasonal.Value)
+                                if (!allowSeasonal.Value)
                                 {
                                     child.gameObject.SetActive(false);
                                 }
@@ -182,8 +194,33 @@ namespace CustomGarage
                         }
                     }
 
-                    if(obj.name == "Scenery")
+                    if (obj.name == "Scenery")
                     {
+                        if(keepCat.Value)
+                        {
+                            Transform catTransform = null;
+
+                            //Take out the cat
+                            foreach (Transform child in obj.transform)
+                            {
+                                if (child.name == "Cat (1)")
+                                {
+                                    catTransform = child;
+                                }
+                            }
+
+                            if(catTransform != null)
+                            {
+                                catTransform.parent = obj.transform.parent;
+                                catTransform.gameObject.SetActive(true);
+
+                                if(catSpawner != null)
+                                {
+                                    catTransform.position = catSpawner.transform.position;
+                                }
+                            }
+                        }
+
                         obj.SetActive(false);
                     }
                 }
@@ -191,7 +228,7 @@ namespace CustomGarage
 
             //Find the skybox manager and set the skybox
             SkyboxManager skybox = GameObject.FindObjectOfType<SkyboxManager>(true);
-            if(skybox != null)
+            if (skybox != null)
             {
                 skybox.SetToSkybox(zeepFile.Header.Skybox, true);
             }
@@ -202,21 +239,28 @@ namespace CustomGarage
             //If the list is empty we cant use custom cameras.
             usingCustomCameras = tempCamBps.Count != 0;
 
-            if(usingCustomCameras)
+            if (usingCustomCameras)
             {
                 //Clear the camera list
                 cameraLocations.Clear();
-                
+
                 //Create the list of 6 locations based on the sorted array
                 for (int i = 0; i < 6; i++)
                 {
                     BlockProperties camUsed = tempCamBps[i % tempCamBps.Count];
-                    Location camLocation = new Location() { position = camUsed.transform.position, rotation = camUsed.transform.rotation };
+                    Location camLocation = new Location()
+                    {
+                        position = camUsed.transform.position,
+                        rotation = camUsed.transform.rotation * Quaternion.Euler(0, 180, 0),
+                        FOV = Mathf.Clamp(camUsed.properties[9], 1f, 180f),
+                        IsOrthographic = Mathf.RoundToInt(camUsed.properties[11]) == 4
+
+                    };
                     cameraLocations.Add(camLocation);
                 }
 
                 //Hide the camera models
-                for(int i = 0; i < tempCamBps.Count; i++)
+                for (int i = 0; i < tempCamBps.Count; i++)
                 {
                     tempCamBps[i].gameObject.SetActive(false);
                 }
@@ -272,15 +316,14 @@ namespace CustomGarage
 
         public void Zoom(MainMenuUI instance, bool zoomIn)
         {
-            if(zoomIn)
+            if (zoomIn)
             {
                 instance.MenuObject.SetActive(false);
             }
 
-            instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[instance.CurrentPosition].position;
-            instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[instance.CurrentPosition].rotation;
+            Plugin.Instance.SetCameraToLocation(instance, instance.CurrentPosition);
 
-            if(!zoomIn)
+            if (!zoomIn)
             {
                 instance.MenuObject.SetActive(true);
             }
@@ -302,9 +345,8 @@ namespace CustomGarage
                 instance.CurrentPosition = 0;
             }
 
-            instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[instance.CurrentPosition].position;
-            instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[instance.CurrentPosition].rotation;
-            
+            Plugin.Instance.SetCameraToLocation(instance, instance.CurrentPosition);
+
             instance.MenuObject.SetActive(true);
             instance.UpdateButtonText();
             instance.State = MainMenuUI.MenuState.None;
@@ -319,14 +361,29 @@ namespace CustomGarage
                 instance.CurrentPosition = instance.PositionCameras.Count - 1;
             }
 
-            instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[instance.CurrentPosition].position;
-            instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[instance.CurrentPosition].rotation;
-            
+            Plugin.Instance.SetCameraToLocation(instance, instance.CurrentPosition);
+
             instance.MenuObject.SetActive(true);
             instance.UpdateButtonText();
             instance.State = MainMenuUI.MenuState.None;
         }
-        
+
+        public void SetCameraToLocation(MainMenuUI instance, int index)
+        {
+            instance.MenuCamera.transform.position = cameraLocations[index].position;
+            instance.MenuCamera.transform.rotation = cameraLocations[index].rotation;
+            if(cameraLocations[index].IsOrthographic)
+            {
+                instance.MenuCamera.orthographic = true;
+                instance.MenuCamera.orthographicSize = cameraLocations[index].FOV;
+            }
+            else
+            {
+                instance.MenuCamera.orthographic = false;
+                instance.MenuCamera.fieldOfView = cameraLocations[index].FOV;
+            }
+        }
+
     }
 
     [HarmonyPatch(typeof(MainMenuUI), "Awake")]
@@ -338,25 +395,23 @@ namespace CustomGarage
         }
     }
 
-    [HarmonyPatch(typeof(MainMenuUI), "Start")]
-    public class MainMenuUIStartPatch
+    [HarmonyPatch(typeof(MainMenuUI), "StartCamera")]
+    public class MainMenuUIStartCameraPatch
     {
         public static bool Prefix(MainMenuUI __instance)
         {
-            if(!Plugin.Instance.usingCustomCameras)
+            if (!Plugin.Instance.usingCustomCameras)
             {
                 return true;
             }
 
-            __instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[__instance.CurrentPosition].position;
-            __instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[__instance.CurrentPosition].rotation;
+            Plugin.Instance.SetCameraToLocation(__instance, __instance.CurrentPosition);
 
-            if (AnimateWhitePanel.IsWhiteCirclePanelActive)
+            if (!AnimateWhitePanel.IsWhiteCirclePanelActive)
             {
-                AnimateWhitePanel.AnimateTheCircle(false, 0.9f, 0.0f, false);
+                return false;
             }
-
-            __instance.UpdateButtonText();
+            AnimateWhitePanel.AnimateTheCircle(false, 0.9f, 0.0f, false);
             return false;
         }
     }
@@ -405,18 +460,23 @@ namespace CustomGarage
         {
             if (!Plugin.Instance.usingCustomCameras)
             {
-                return true;
+                return true; // Call the original method as usual
             }
 
-            __instance.OnOpen();
+            // Call the base method using reflection
+            MethodInfo baseOnOpen = typeof(MainMenuUI).BaseType.GetMethod("OnOpen", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (baseOnOpen != null)
+            {
+                baseOnOpen.Invoke(__instance, null);
+            }
+
             __instance.UpdateButtonText();
             __instance.Navigator.navigatorActive = false;
             if (PlayerManager.Instance.exitFromLevelEditor)
             {
                 PlayerManager.Instance.exitFromLevelEditor = false;
                 __instance.CurrentPosition = __instance.LevelEditorPosition;
-                __instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[__instance.CurrentPosition].position;
-                __instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[__instance.CurrentPosition].rotation;
+                Plugin.Instance.SetCameraToLocation(__instance, __instance.CurrentPosition);
                 __instance.UpdateButtonText();
             }
             if (!__instance.ZoomedIn)
@@ -426,7 +486,7 @@ namespace CustomGarage
 
             Plugin.Instance.Zoom(__instance, false);
 
-            return false;
+            return false; // Skip the original method
         }
     }
 
