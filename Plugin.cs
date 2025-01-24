@@ -7,15 +7,22 @@ using System.Linq;
 using UnityEngine;
 using System.Collections.Generic;
 using UnityEngine.SceneManagement;
+using FMODSyntax;
 
 namespace CustomGarage
 {
+    public struct Location
+    {
+        public Vector3 position;
+        public Quaternion rotation;
+    }
+
     [BepInPlugin(pluginGUID, pluginName, pluginVersion)]
     public class Plugin : BaseUnityPlugin
     {
         public const string pluginGUID = "com.metalted.zeepkist.customgarage";
         public const string pluginName = "Custom Garage";
-        public const string pluginVersion = "1.0";
+        public const string pluginVersion = "1.1";
 
         public static Plugin Instance;
 
@@ -27,6 +34,11 @@ namespace CustomGarage
         public ConfigEntry<bool> allowSeasonal;
         public ConfigEntry<bool> keepOriginalScenery;
         public ConfigEntry<bool> blueprintGarageVisible;
+        public ConfigEntry<bool> useCustomCameras;
+
+        //Camera paints: reel/outer ring, camera body, inner reel/inner ring
+        public bool usingCustomCameras = false;
+        public List<Location> cameraLocations = new List<Location>();
 
         private void Awake()
         {
@@ -43,6 +55,7 @@ namespace CustomGarage
             allowSeasonal = Config.Bind("Settings", "Allow Seasonal Items", false, "Should seasonal items be spawned?");
             keepOriginalScenery = Config.Bind("Settings", "Keep Original Scenery", false, "Should the original scenery be visible?");
             blueprintGarageVisible = Config.Bind("Settings", "Blueprint Garage Visible", true, "Should the blueprint garage be visible (for open world menu)");
+            useCustomCameras = Config.Bind("Settings", "Use Custom Camera Positions", false, "Do we use the regular camera's, or the in the blueprint defined camera positions?");
 
             // Plugin startup logic
             Logger.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
@@ -85,6 +98,7 @@ namespace CustomGarage
             GameObject bpCopy = InstantiateBlueprint(zeepFile);
 
             BlockProperties garageBlockProperties = null;
+            List<BlockProperties> tempCamBps = new List<BlockProperties>();
 
             foreach (Transform child in bpCopy.transform)
             {
@@ -92,6 +106,15 @@ namespace CustomGarage
                 if (blockProperties != null && blockProperties.blockID == 2290)
                 {
                     garageBlockProperties = blockProperties;
+                    break;
+                }
+
+                if (blockProperties != null && blockProperties.blockID == 2008)
+                {
+                    if(useCustomCameras.Value)
+                    {
+                        tempCamBps.Add(blockProperties);
+                    }
                     break;
                 }
             }
@@ -172,6 +195,32 @@ namespace CustomGarage
             {
                 skybox.SetToSkybox(zeepFile.Header.Skybox, true);
             }
+
+            //Sort the cameras by their body color to determine the order.
+            tempCamBps.Sort((a, b) => a.properties[10].CompareTo(b.properties[10]));
+
+            //If the list is empty we cant use custom cameras.
+            usingCustomCameras = tempCamBps.Count != 0;
+
+            if(usingCustomCameras)
+            {
+                //Clear the camera list
+                cameraLocations.Clear();
+                
+                //Create the list of 6 locations based on the sorted array
+                for (int i = 0; i < 6; i++)
+                {
+                    BlockProperties camUsed = tempCamBps[i % tempCamBps.Count];
+                    Location camLocation = new Location() { position = camUsed.transform.position, rotation = camUsed.transform.rotation };
+                    cameraLocations.Add(camLocation);
+                }
+
+                //Hide the camera models
+                for(int i = 0; i < tempCamBps.Count; i++)
+                {
+                    tempCamBps[i].gameObject.SetActive(false);
+                }
+            }
         }
 
         public GameObject InstantiateBlueprint(ZeeplevelFile zeeplevelFile)
@@ -220,6 +269,64 @@ namespace CustomGarage
 
             return blockPropertyJSON;
         }
+
+        public void Zoom(MainMenuUI instance, bool zoomIn)
+        {
+            if(zoomIn)
+            {
+                instance.MenuObject.SetActive(false);
+            }
+
+            instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[instance.CurrentPosition].position;
+            instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[instance.CurrentPosition].rotation;
+
+            if(!zoomIn)
+            {
+                instance.MenuObject.SetActive(true);
+            }
+            else
+            {
+                instance.UIManager.OpenUI<BaseUI>(instance.PositionUIs[instance.CurrentPosition]);
+            }
+
+            instance.ZoomedIn = zoomIn;
+            instance.State = MainMenuUI.MenuState.None;
+        }
+
+        public void Next(MainMenuUI instance)
+        {
+            instance.CurrentPosition++;
+
+            if (instance.CurrentPosition >= instance.PositionCameras.Count)
+            {
+                instance.CurrentPosition = 0;
+            }
+
+            instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[instance.CurrentPosition].position;
+            instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[instance.CurrentPosition].rotation;
+            
+            instance.MenuObject.SetActive(true);
+            instance.UpdateButtonText();
+            instance.State = MainMenuUI.MenuState.None;
+        }
+
+        public void Previous(MainMenuUI instance)
+        {
+            instance.CurrentPosition--;
+
+            if (instance.CurrentPosition < 0)
+            {
+                instance.CurrentPosition = instance.PositionCameras.Count - 1;
+            }
+
+            instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[instance.CurrentPosition].position;
+            instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[instance.CurrentPosition].rotation;
+            
+            instance.MenuObject.SetActive(true);
+            instance.UpdateButtonText();
+            instance.State = MainMenuUI.MenuState.None;
+        }
+        
     }
 
     [HarmonyPatch(typeof(MainMenuUI), "Awake")]
@@ -228,6 +335,230 @@ namespace CustomGarage
         public static void Postfix()
         {
             Plugin.Instance.OnMainMenu();
+        }
+    }
+
+    [HarmonyPatch(typeof(MainMenuUI), "Start")]
+    public class MainMenuUIStartPatch
+    {
+        public static bool Prefix(MainMenuUI __instance)
+        {
+            if(!Plugin.Instance.usingCustomCameras)
+            {
+                return true;
+            }
+
+            __instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[__instance.CurrentPosition].position;
+            __instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[__instance.CurrentPosition].rotation;
+
+            if (AnimateWhitePanel.IsWhiteCirclePanelActive)
+            {
+                AnimateWhitePanel.AnimateTheCircle(false, 0.9f, 0.0f, false);
+            }
+
+            __instance.UpdateButtonText();
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(MainMenuUI), "Update")]
+    public class MainMenuUIUpdatePatch
+    {
+        public static bool Prefix(MainMenuUI __instance)
+        {
+            if (!Plugin.Instance.usingCustomCameras)
+            {
+                return true;
+            }
+
+            if ((__instance.MenuLeft.buttonDown || __instance.State == MainMenuUI.MenuState.GoPrevious && __instance.MenuAccept.buttonDown) && !__instance.ZoomedIn && (!__instance.PositionCameras[__instance.CurrentPosition].invertedOrientation || !__instance.GameSettings.menu_controls_camera_relative) || (__instance.MenuRight.buttonDown || __instance.State == MainMenuUI.MenuState.GoPrevious && __instance.MenuAccept.buttonDown) && !__instance.ZoomedIn && __instance.PositionCameras[__instance.CurrentPosition].invertedOrientation && __instance.GameSettings.menu_controls_camera_relative)
+            {
+                __instance.GoPrevious(true);
+                AudioEvents.MenuClick.Play((Transform)null);
+            }
+            else if ((__instance.MenuRight.buttonDown || __instance.State == MainMenuUI.MenuState.GoNext && __instance.MenuAccept.buttonDown) && !__instance.ZoomedIn && (!__instance.PositionCameras[__instance.CurrentPosition].invertedOrientation || !__instance.GameSettings.menu_controls_camera_relative) || (__instance.MenuLeft.buttonDown || __instance.State == MainMenuUI.MenuState.GoNext && __instance.MenuAccept.buttonDown) && !__instance.ZoomedIn && __instance.PositionCameras[__instance.CurrentPosition].invertedOrientation && __instance.GameSettings.menu_controls_camera_relative)
+            {
+                __instance.GoNext(true);
+                AudioEvents.MenuClick.Play((Transform)null);
+            }
+            else if (__instance.MenuAccept.buttonDown && !__instance.ZoomedIn)
+            {
+                __instance.ZoomIn();
+                AudioEvents.MenuClick.Play((Transform)null);
+            }
+            else
+            {
+                if (!__instance.MenuAccept.buttonDown && !__instance.MenuCancel.buttonDown && !__instance.Escape.buttonDown && !__instance.Pause.buttonDown || !__instance.ZoomedIn)
+                    return false;
+                __instance.ZoomOut();
+                AudioEvents.MenuClick.Play((Transform)null);
+            }
+
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(MainMenuUI), "OnOpen")]
+    public class MainMenuUIOnOpenPatch
+    {
+        public static bool Prefix(MainMenuUI __instance)
+        {
+            if (!Plugin.Instance.usingCustomCameras)
+            {
+                return true;
+            }
+
+            __instance.OnOpen();
+            __instance.UpdateButtonText();
+            __instance.Navigator.navigatorActive = false;
+            if (PlayerManager.Instance.exitFromLevelEditor)
+            {
+                PlayerManager.Instance.exitFromLevelEditor = false;
+                __instance.CurrentPosition = __instance.LevelEditorPosition;
+                __instance.MenuCamera.transform.position = Plugin.Instance.cameraLocations[__instance.CurrentPosition].position;
+                __instance.MenuCamera.transform.rotation = Plugin.Instance.cameraLocations[__instance.CurrentPosition].rotation;
+                __instance.UpdateButtonText();
+            }
+            if (!__instance.ZoomedIn)
+            {
+                return false;
+            }
+
+            Plugin.Instance.Zoom(__instance, false);
+
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(MainMenuUI), "ZoomIn")]
+    public class MainMenuUIZoomInPatch
+    {
+        public static bool Prefix(MainMenuUI __instance)
+        {
+            if (!Plugin.Instance.usingCustomCameras)
+            {
+                return true;
+            }
+
+            if(__instance.ZoomedIn)
+            {
+                return false;
+            }
+
+            if(__instance.State == MainMenuUI.MenuState.ZoomIn)
+            {
+                Plugin.Instance.Zoom(__instance, true);
+            }
+            else
+            {
+                if(__instance.State != MainMenuUI.MenuState.None)
+                {
+                    return false;
+                }
+
+                Plugin.Instance.Zoom(__instance, true);
+            }
+
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(MainMenuUI), "ZoomOut")]
+    public class MainMenuUIZoomOutPatch
+    {
+        public static bool Prefix(MainMenuUI __instance)
+        {
+            if (!Plugin.Instance.usingCustomCameras)
+            {
+                return true;
+            }
+
+            if (!__instance.ZoomedIn)
+            {
+                return false;
+            }
+
+            if (__instance.State == MainMenuUI.MenuState.ZoomOut)
+            {
+                Plugin.Instance.Zoom(__instance, false);
+            }
+            else
+            {
+                if (__instance.State != MainMenuUI.MenuState.None)
+                {
+                    return false;
+                }
+
+                Plugin.Instance.Zoom(__instance, false);
+            }
+
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(MainMenuUI), "GoNext")]
+    public class MainMenuUIGoNextPatch
+    {
+        public static bool Prefix(MainMenuUI __instance, ref bool ignoreRelative)
+        {
+            if (!Plugin.Instance.usingCustomCameras)
+            {
+                return true;
+            }
+
+            if(__instance.ZoomedIn)
+            {
+                return false;
+            }
+
+            if(__instance.State == MainMenuUI.MenuState.GoNext)
+            {
+                Plugin.Instance.Next(__instance);
+            }
+            else
+            {
+                if(__instance.State != MainMenuUI.MenuState.None)
+                {
+                    return false;
+                }
+
+                Plugin.Instance.Next(__instance);
+            }
+
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(MainMenuUI), "GoPrevious")]
+    public class MainMenuUIGoPreviousPatch
+    {
+        public static bool Prefix(MainMenuUI __instance, ref bool ignoreRelative)
+        {
+            if (!Plugin.Instance.usingCustomCameras)
+            {
+                return true;
+            }
+
+            if (__instance.ZoomedIn)
+            {
+                return false;
+            }
+
+            if (__instance.State == MainMenuUI.MenuState.GoPrevious)
+            {
+                Plugin.Instance.Previous(__instance);
+            }
+            else
+            {
+                if (__instance.State != MainMenuUI.MenuState.None)
+                {
+                    return false;
+                }
+
+                Plugin.Instance.Previous(__instance);
+            }
+
+            return false;
         }
     }
 }
