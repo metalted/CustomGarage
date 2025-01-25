@@ -25,7 +25,7 @@ namespace CustomGarage
     {
         public const string pluginGUID = "com.metalted.zeepkist.customgarage";
         public const string pluginName = "Custom Garage";
-        public const string pluginVersion = "1.1";
+        public const string pluginVersion = "1.2";
 
         public static Plugin Instance;
 
@@ -71,7 +71,9 @@ namespace CustomGarage
             //If the plugin is not enabled, stop executing.
             if (!pluginEnabled.Value)
             {
+                //Make sure to clear some variables.
                 usingCustomCameras = false;
+                cameraLocations.Clear();
                 return;
             }
 
@@ -103,31 +105,55 @@ namespace CustomGarage
             //Instantiate the blueprint
             GameObject bpCopy = InstantiateBlueprint(zeepFile);
 
+            //Find the special blocks:
+            //Garage block, first one is the alignment one, others are treated like a normal block.
+            //Camera blocks, all are used for positioning.
+            //Cat spawner, for setting the cat position. First one is for positioning, others are treated like a normal block.
+            //Spike spawner, for setting the skybox rotation. First one is for rotation, others are treated like a normal block.
             BlockProperties garageBlockProperties = null;
             List<BlockProperties> tempCamBps = new List<BlockProperties>();
             BlockProperties catSpawner = null;
+            BlockProperties spikeSpawner = null;
 
             foreach (Transform child in bpCopy.transform)
             {
                 BlockProperties blockProperties = child.GetComponent<BlockProperties>();
 
-                if (blockProperties != null && blockProperties.blockID == 2290)
+                if(blockProperties != null)
                 {
-                    garageBlockProperties = blockProperties;
-                }
-
-                if (blockProperties != null && blockProperties.blockID == 2008)
-                {
-                    if (useCustomCameras.Value)
+                    switch(blockProperties.blockID)
                     {
-                        tempCamBps.Add(blockProperties);
+                        case 2290:
+                            //Garage
+                            if(garageBlockProperties == null)
+                            {
+                                garageBlockProperties = blockProperties;
+                            }
+                            break;
+                        case 2008:
+                            //Camera
+                            if (useCustomCameras.Value)
+                            {
+                                tempCamBps.Add(blockProperties);
+                            }
+                            break;
+                        case 42:
+                            //Cat spawner
+                            if(catSpawner == null)
+                            {
+                                catSpawner = blockProperties;
+                                catSpawner.gameObject.SetActive(false);
+                            }
+                            break;
+                        case 281:
+                            //Spike spawner
+                            if(spikeSpawner == null)
+                            {
+                                spikeSpawner = blockProperties;
+                                spikeSpawner.gameObject.SetActive(false);
+                            }
+                            break;
                     }
-                }
-
-                if (blockProperties != null && blockProperties.blockID == 42)
-                {
-                    catSpawner = blockProperties;
-                    catSpawner.gameObject.SetActive(false);
                 }
             }
 
@@ -139,6 +165,7 @@ namespace CustomGarage
                 return;
             }
 
+            //Calculate the transform placement for the blueprint garage.
             Vector3 targetPosition = new Vector3(-0.036f, 6.358f, 7.931f);
             float scaleFactor = 0.33333f / garageBlockProperties.gameObject.transform.localScale.x;
             float garageRotation = garageBlockProperties.gameObject.transform.localEulerAngles.y;
@@ -159,6 +186,7 @@ namespace CustomGarage
             Vector3 garageShift = garageBlockProperties.gameObject.transform.position - bpCopy.transform.position;
             bpCopy.transform.position = targetPosition - garageShift;
 
+            //Hide the blueprint garage according to the setting.
             if (!blueprintGarageVisible.Value)
             {
                 garageBlockProperties.gameObject.SetActive(false);
@@ -167,15 +195,19 @@ namespace CustomGarage
             // Get all root objects in the active scene
             GameObject[] rootObjects = SceneManager.GetActiveScene().GetRootGameObjects();
 
+            //Go over all the objects.
             foreach (GameObject obj in rootObjects)
             {
+                //If we dont want to keep the original scenery.
                 if (!keepOriginalScenery.Value)
                 {
+                    //Find the object called House.
                     if (obj.name == "House")
                     {
                         // Go over all children in "House"
                         foreach (Transform child in obj.transform)
                         {
+                            //Hide the time based cosmetics according to the config.
                             if (child.name == "TIME BASED COSMETICS")
                             {
                                 if (!allowSeasonal.Value)
@@ -183,10 +215,12 @@ namespace CustomGarage
                                     child.gameObject.SetActive(false);
                                 }
                             }
+                            //Always keep the soapbox model.
                             else if (child.name == "Soapbox Model Showoff With Physics")
                             {
                                 //Do nothing
                             }
+                            //Hide everything else from the house scenery.
                             else
                             {
                                 child.gameObject.SetActive(false);
@@ -194,8 +228,10 @@ namespace CustomGarage
                         }
                     }
 
+                    //Find the scenery object.
                     if (obj.name == "Scenery")
                     {
+                        //Make sure the cat is taken out before we hide the object.
                         if(keepCat.Value)
                         {
                             Transform catTransform = null;
@@ -209,6 +245,7 @@ namespace CustomGarage
                                 }
                             }
 
+                            //If we found the cat, and there is a cat spawner block present, place the cat at the spawners position.
                             if(catTransform != null)
                             {
                                 catTransform.parent = obj.transform.parent;
@@ -230,8 +267,16 @@ namespace CustomGarage
             SkyboxManager skybox = GameObject.FindObjectOfType<SkyboxManager>(true);
             if (skybox != null)
             {
+                //If a spike spawner is present, set the y-rotation of the skybox manager to match that of the spike spawner object
+                if (spikeSpawner != null)
+                {
+                    Camera.main.transform.GetChild(0).transform.Rotate(0, spikeSpawner.transform.eulerAngles.y, 0);
+                }
+
                 skybox.SetToSkybox(zeepFile.Header.Skybox, true);
             }
+
+           
 
             //Sort the cameras by their body color to determine the order.
             tempCamBps.Sort((a, b) => a.properties[10].CompareTo(b.properties[10]));
@@ -400,11 +445,13 @@ namespace CustomGarage
     {
         public static bool Prefix(MainMenuUI __instance)
         {
+            //Continue original codes if using custom cameras is off.
             if (!Plugin.Instance.usingCustomCameras)
             {
                 return true;
             }
 
+            //Patched zeepkist code.
             Plugin.Instance.SetCameraToLocation(__instance, __instance.CurrentPosition);
 
             if (!AnimateWhitePanel.IsWhiteCirclePanelActive)
@@ -421,11 +468,13 @@ namespace CustomGarage
     {
         public static bool Prefix(MainMenuUI __instance)
         {
+            //Continue original codes if using custom cameras is off.
             if (!Plugin.Instance.usingCustomCameras)
             {
                 return true;
             }
 
+            //Patched zeepkist code.
             if ((__instance.MenuLeft.buttonDown || __instance.State == MainMenuUI.MenuState.GoPrevious && __instance.MenuAccept.buttonDown) && !__instance.ZoomedIn && (!__instance.PositionCameras[__instance.CurrentPosition].invertedOrientation || !__instance.GameSettings.menu_controls_camera_relative) || (__instance.MenuRight.buttonDown || __instance.State == MainMenuUI.MenuState.GoPrevious && __instance.MenuAccept.buttonDown) && !__instance.ZoomedIn && __instance.PositionCameras[__instance.CurrentPosition].invertedOrientation && __instance.GameSettings.menu_controls_camera_relative)
             {
                 __instance.GoPrevious(true);
@@ -458,10 +507,13 @@ namespace CustomGarage
     {
         public static bool Prefix(MainMenuUI __instance)
         {
+            //Continue original codes if using custom cameras is off.
             if (!Plugin.Instance.usingCustomCameras)
             {
-                return true; // Call the original method as usual
+                return true;
             }
+
+            //Patched zeepkist code.
 
             // Call the base method using reflection
             MethodInfo baseOnOpen = typeof(MainMenuUI).BaseType.GetMethod("OnOpen", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -486,7 +538,7 @@ namespace CustomGarage
 
             Plugin.Instance.Zoom(__instance, false);
 
-            return false; // Skip the original method
+            return false;
         }
     }
 
@@ -495,11 +547,13 @@ namespace CustomGarage
     {
         public static bool Prefix(MainMenuUI __instance)
         {
+            //Continue original codes if using custom cameras is off.
             if (!Plugin.Instance.usingCustomCameras)
             {
                 return true;
             }
 
+            //Patched zeepkist code.
             if(__instance.ZoomedIn)
             {
                 return false;
@@ -528,11 +582,13 @@ namespace CustomGarage
     {
         public static bool Prefix(MainMenuUI __instance)
         {
+            //Continue original codes if using custom cameras is off.
             if (!Plugin.Instance.usingCustomCameras)
             {
                 return true;
             }
 
+            //Patched zeepkist code.
             if (!__instance.ZoomedIn)
             {
                 return false;
@@ -561,11 +617,13 @@ namespace CustomGarage
     {
         public static bool Prefix(MainMenuUI __instance, ref bool ignoreRelative)
         {
+            //Continue original codes if using custom cameras is off.
             if (!Plugin.Instance.usingCustomCameras)
             {
                 return true;
             }
 
+            //Patched zeepkist code.
             if(__instance.ZoomedIn)
             {
                 return false;
@@ -594,11 +652,13 @@ namespace CustomGarage
     {
         public static bool Prefix(MainMenuUI __instance, ref bool ignoreRelative)
         {
+            //Continue original codes if using custom cameras is off.
             if (!Plugin.Instance.usingCustomCameras)
             {
                 return true;
             }
 
+            //Patched zeepkist code.
             if (__instance.ZoomedIn)
             {
                 return false;
